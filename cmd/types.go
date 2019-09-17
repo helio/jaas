@@ -13,6 +13,10 @@ type TaskRequest struct {
 	EnvFiles    []string
 	Secrets     []string
 
+	ReportUrl    string
+	HeartbeatUrl string
+	JobToken     string
+
 	ShowLogs      bool
 	Timeout       string
 	RemoveService bool

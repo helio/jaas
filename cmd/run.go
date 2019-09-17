@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/ioutil"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"net/http"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
@@ -36,6 +39,10 @@ func init() {
 	runCmd.PersistentFlags().StringArrayVarP(&taskRequest.EnvVars, "env", "e", []string{}, "environmental variable for task")
 	runCmd.PersistentFlags().StringArrayVarP(&taskRequest.Mounts, "mount", "m", []string{}, "bind-mount a volume the task")
 	runCmd.PersistentFlags().StringArrayVarP(&taskRequest.Secrets, "secret", "s", []string{}, "Add existing secret to task")
+
+	runCmd.PersistentFlags().StringVarP(&taskRequest.ReportUrl, "report-url", "p", "", "Report URL for Helio")
+	runCmd.PersistentFlags().StringVarP(&taskRequest.HeartbeatUrl, "heartbeat-url", "y", "", "Heartbeat URL for Helio")
+	runCmd.PersistentFlags().StringVarP(&taskRequest.JobToken, "job-token", "j", "", "Job Token for Helio API access")
 
 	runCmd.PersistentFlags().StringArrayVar(&taskRequest.EnvFiles, "env-file", []string{}, "populate environment from an envfile for the task")
 
@@ -92,7 +99,7 @@ func runTask(taskRequest TaskRequest) error {
 
 	var c *client.Client
 	var err error
-	c, err = client.NewEnvClient()
+	c, err = client.NewClientWithOpts(client.WithAPIVersionNegotiation())
 	if err != nil {
 
 		return fmt.Errorf("is the Docker Daemon running? Error: %s", err.Error())
@@ -101,7 +108,7 @@ func runTask(taskRequest TaskRequest) error {
 	// Check that experimental mode is enabled on the daemon, fall back to no logging if not
 	versionInfo, versionErr := c.ServerVersion(context.Background())
 	if versionErr != nil {
-		log.Fatal("Is the Docker Daemon running?")
+		log.Fatal("Error " + versionErr.Error() + ". Is the Docker Daemon running?")
 
 		return versionErr
 	}
@@ -274,11 +281,34 @@ func pollTask(c *client.Client, id string, timeout time.Duration, showlogs, remo
 
 		fmt.Println("ID: ", item.ID, " Update at: ", item.UpdatedAt)
 		for {
+			if len(taskRequest.HeartbeatUrl) > 0 && len(taskRequest.JobToken) > 0 {
+				heartbeatClient := &http.Client{}
+				heartbeatRequest, hrError := http.NewRequest(http.MethodPut, taskRequest.HeartbeatUrl, bytes.NewBufferString("{}"))
+				if hrError != nil {
+					log.Fatal(hrError)
+				}
+				heartbeatRequest.Header.Set("Content-Type", "application/json; charset=utf-8")
+				heartbeatRequest.Header.Set("Authorization", "Bearer "+taskRequest.JobToken)
+				_, _ = heartbeatClient.Do(heartbeatRequest)
+			}
+
 			time.Sleep(500 * time.Millisecond)
 
 			taskExitCode, found := showTasks(c, item.ID, showlogs, removeService)
 			if found {
 				exitCode = taskExitCode
+
+				if len(taskRequest.ReportUrl) > 0 && len(taskRequest.JobToken) > 0 {
+					reportClient := &http.Client{}
+					reportRequest, rrError := http.NewRequest(http.MethodPut, taskRequest.ReportUrl, bytes.NewBufferString("{\"docker_service_id\":\""+id+"\",\"exit_code\":\""+strconv.Itoa(exitCode)+"\"}"))
+					if rrError != nil {
+						log.Fatal(rrError)
+					}
+					reportRequest.Header.Set("Content-Type", "application/json; charset=utf-8")
+					reportRequest.Header.Set("Authorization", "Bearer "+taskRequest.JobToken)
+					_, _ = reportClient.Do(reportRequest)
+				}
+
 				break
 			}
 			now := time.Now()
